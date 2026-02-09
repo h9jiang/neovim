@@ -1059,6 +1059,274 @@ function Client:is_stopped()
   return self.rpc.is_closing() or self._is_stopping
 end
 
+
+--- @param field lsp.FormField
+--- @param default_value? any
+--- @param callback fun(answer: any?)
+local function prompt_for_field(field, default_value, callback)
+  local kind = field.type.kind
+  if kind == 'string' then
+    vim.ui.input({
+      prompt = field.description,
+      default = default_value or field.default,
+    }, callback)
+  elseif kind == 'number' then
+    vim.ui.input({
+      prompt = field.description,
+      default = default_value and tostring(default_value) or (field.default and tostring(field.default)),
+    }, function(input)
+      if not input then
+        callback(nil)
+        return
+      end
+      local n = tonumber(input)
+      if n then
+        callback(n)
+      else
+        vim.notify('Invalid number', vim.log.levels.WARN)
+        callback(nil)
+      end
+    end)
+  elseif kind == 'bool' then
+    vim.ui.select({ 'Yes', 'No' }, {
+      prompt = field.description,
+    }, function(item)
+      if item == 'Yes' then
+        callback(true)
+      elseif item == 'No' then
+        callback(false)
+      else
+        callback(nil)
+      end
+    end)
+  elseif kind == 'enum' then
+    local items = field.type.values
+    local descriptions = field.type.description
+    vim.ui.select(items, {
+      prompt = field.description,
+      format_item = function(item)
+        if descriptions and descriptions ~= vim.NIL then
+          local idx = vim.fn.index(items, item)
+          if idx >= 0 and descriptions[idx + 1] then
+            return string.format('%s (%s)', descriptions[idx + 1], item)
+          end
+        end
+        return item
+      end,
+    }, callback)
+  else
+    vim.notify('Unsupported form field kind: ' .. tostring(kind), vim.log.levels.WARN)
+    callback(nil)
+  end
+end
+
+--- @param fields lsp.FormField[]
+--- @param answers any[]
+--- @param callback fun(answers: any[]?)
+local function collect_answers(fields, answers, callback)
+  if not fields or #fields == 0 then
+    callback({})
+    return
+  end
+  local collected = {}
+  local function next_field(idx)
+    if idx > #fields then
+      callback(collected)
+      return
+    end
+    local field = fields[idx]
+    local default_answer = answers and answers[idx]
+    prompt_for_field(field, default_answer, function(answer)
+      if answer == nil then
+        callback(nil) -- Cancelled
+        return
+      end
+      table.insert(collected, answer)
+      next_field(idx + 1)
+    end)
+  end
+  next_field(1)
+end
+
+--- @param client vim.lsp.Client
+--- @param command string
+--- @param args any[]
+--- @param callback fun(command: string?, args: any[]?)
+local function resolve_command(client, command, args, callback)
+  local max_retries = 5
+  local current_args = args
+  local current_command = command
+  local retries = 0
+
+  local function attempt_resolve()
+    if retries >= max_retries then
+      vim.notify('Max retries exceeded for command resolution', vim.log.levels.WARN)
+      callback(nil, nil)
+      return
+    end
+    retries = retries + 1
+
+    local params = {
+      command = current_command,
+      arguments = current_args,
+    }
+
+    client:request('command/resolve', params, function(err, result)
+      if err then
+        -- if error, maybe server doesn't support it or failed, just return original
+        -- or maybe we should fail? sticking to original behavior if resolve fails might be safer?
+        -- but if server returned error, maybe we should abort?
+        -- user implementation returns undefined if resolve fails.
+        if err.code == -32601 then -- MethodNotFound
+           callback(command, args)
+           return
+        end
+        vim.notify('Failed to resolve command: ' .. tostring(err.message), vim.log.levels.WARN)
+        callback(nil, nil)
+        return
+      end
+      
+      if not result then
+        -- If no result, assume no changes needed? or failure?
+        -- Code says "if (!response) { return undefined; }"
+        callback(nil, nil)
+        return
+      end
+
+      -- Update current command/args from result
+      if result.command then current_command = result.command end
+      if result.arguments then current_args = result.arguments end
+
+      -- Check if we need more info
+      if not result.formFields or #result.formFields == 0 then
+        callback(current_command, current_args)
+        return
+      end
+
+      -- Show errors if any
+      for i, field in ipairs(result.formFields) do
+        if field.error then
+           vim.notify(string.format('Question %d: %s', i, field.error), vim.log.levels.WARN)
+        end
+      end
+
+      collect_answers(result.formFields, result.formAnswers, function(answers)
+        if not answers then
+          callback(nil, nil)
+          return
+        end
+        -- Update result with answers and retry
+        -- We need to construct the next params. The server expects formAnswers in the next request
+        -- effectively we are modifying 'current_args' conceptually, but actually we are just
+        -- preparing the next resolve request.
+        -- Wait, the `result` IS the new params for the next resolve, but we need to inject answers.
+        -- result is lsp.ExecuteCommandParams (extended).
+        -- We need to feed it back into resolve logic.
+        
+        -- The typescript logic:
+        -- param = response (which is ExecuteCommandParams)
+        -- param.formAnswers = answers
+        -- param.formFields = undefined
+        -- loop
+        
+        -- So we construct new args for the *next* resolve call, which are properties of ExecuteCommandParams
+        -- The next resolve call takes ExecuteCommandParams as 'params'.
+        -- We don't change 'command' or 'arguments' (the properties of ExecuteCommandParams) yet?
+        -- Actually 'command' and 'arguments' ARE properties of ExecuteCommandParams.
+        
+        -- We need to construct a table that looks like ExecuteCommandParams
+        local next_params = {
+           command = result.command,
+           arguments = result.arguments,
+           formAnswers = answers,
+           -- formFields should be nil/undefined
+        }
+        
+        -- We update our 'current_command' and 'current_args' state so that if we are done, we use them.
+        -- But for the RECURSIVE call, we pass the *entire* object as params to 'command/resolve'.
+        -- Wait, 'client:request' takes 'params'.
+        -- In the loop, I used:
+        -- local params = { command = current_command, arguments = current_args }
+        -- But now I need to include 'formAnswers'.
+        -- So I should probably just keep track of the *entire* params object.
+        
+        current_command = next_params.command
+        current_args = next_params.arguments
+        
+        -- BUT, the key is: how do I pass 'formAnswers' to the next 'client:request'?
+        -- client:request('command/resolve', params, ...)
+        -- So I need to pass 'next_params' to the next request.
+        -- Implementation detail: My loop constructs 'params' from 'current_command' and 'current_args'. 
+        -- I need to also store 'formAnswers' in the state if I want to pass it.
+        
+        -- usage of closure state for 'formAnswers' is tricky if I assume standard params structure.
+        -- let's just pass `next_params` directly to the request in the recursion?
+        -- No, better to refactor `attempt_resolve` to take `params` as input.
+        
+        attempt_resolve_with_params(next_params)
+      end)
+    end)
+  end
+  
+  -- Function to handle the recursion with explicit params
+  -- defined locally to be visible
+  function attempt_resolve_with_params(params)
+      if retries >= max_retries then
+        vim.notify('Max retries exceeded for command resolution', vim.log.levels.WARN)
+        callback(nil, nil)
+        return
+      end
+      retries = retries + 1
+      
+      client:request('command/resolve', params, function(err, result)
+          if err then
+             if err.code == -32601 then 
+                 callback(command, args)
+                 return
+             end
+             vim.notify('Failed to resolve command: ' .. tostring(err.message), vim.log.levels.WARN)
+             callback(nil, nil)
+             return
+          end
+          
+          if not result then
+             callback(nil, nil)
+             return
+          end
+          
+          if not result.formFields or #result.formFields == 0 then
+             callback(result.command, result.arguments)
+             return
+          end
+          
+           for i, field in ipairs(result.formFields) do
+            if field.error then
+               vim.notify(string.format('Question %d: %s', i, field.error), vim.log.levels.WARN)
+            end
+          end
+
+          collect_answers(result.formFields, result.formAnswers, function(answers)
+             if not answers then
+               callback(nil, nil)
+               return
+             end
+             local next_params = {
+               command = result.command,
+               arguments = result.arguments,
+               formAnswers = answers,
+             }
+             attempt_resolve_with_params(next_params)
+          end)
+      end)
+  end
+
+  -- Initial call
+  attempt_resolve_with_params({
+    command = command,
+    arguments = args,
+  })
+end
+
 --- Execute a lsp command, either via client command function (if available)
 --- or via workspace/executeCommand (if supported by the server)
 ---
@@ -1097,7 +1365,17 @@ function Client:exec_cmd(command, context, handler)
     command = cmdname,
     arguments = command.arguments,
   }
-  self:request('workspace/executeCommand', params, handler, context.bufnr)
+
+  resolve_command(self, cmdname, command.arguments, function(final_command, final_args)
+    if not final_command then
+      return
+    end
+
+    -- Update params with resolved values
+    params.command = final_command
+    params.arguments = final_args
+    self:request('workspace/executeCommand', params, handler, context.bufnr)
+  end)
 end
 
 --- Default handler for the 'textDocument/didOpen' LSP notification.
