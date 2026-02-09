@@ -1064,6 +1064,11 @@ end
 --- @param default_value? any
 --- @param callback fun(answer: any?)
 local function prompt_for_field(field, default_value, callback)
+  -- Surface error if present
+  if field.error then
+    vim.notify(field.error, vim.log.levels.ERROR)
+  end
+
   local kind = field.type.kind
   if kind == 'string' then
     vim.ui.input({
