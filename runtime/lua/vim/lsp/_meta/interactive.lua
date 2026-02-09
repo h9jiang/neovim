@@ -1,0 +1,118 @@
+---@meta
+
+-- FormFieldTypeString defines a text input.
+--
+-- It is defined as a struct to allow for future extensibility, such as
+-- adding regex validation or file URI constraints.
+---@class lsp.FormFieldTypeString
+---@field kind 'string'
+
+-- FormFieldTypeDocumentURI defines an input for a file or directory URI.
+--
+-- The client determines the best mechanism to collect this information from
+-- the user (e.g., a graphical file picker, a text input with autocomplete, etc).
+--
+-- The value returned by the client must be a valid "DocumentUri" as defined
+-- in the LSP specification:
+-- https://microsoft.github.io/language-server-protocol/specifications/lsp/3.17/specification/#documentUri
+---@class lsp.FormFieldTypeDocumentURI
+---@field kind 'documentURI'
+
+-- FormFieldTypeBool defines a boolean input.
+---@class lsp.FormFieldTypeBool
+---@field kind 'bool'
+
+-- FormFieldTypeNumber defines a numeric input.
+--
+-- It is defined as a struct to allow for future extensibility, such as
+-- adding range constraints (min/max) or precision requirements.
+---@class lsp.FormFieldTypeNumber
+---@field kind 'number'
+
+-- FormFieldTypeEnum defines a selection from a set of values.
+---@class lsp.FormFieldTypeEnum
+---@field kind 'enum'
+---
+-- Name is an optional identifier for the enum type.
+---@field name? string
+---
+-- Values is the set of allowable options.
+---@field values string[]
+---
+-- Description provides human-readable labels for the options.
+--
+-- This slice must have the same length as Values, where Description[i]
+-- corresponds to Values[i].
+---@field description? string[]
+
+-- FormFieldTypeList defines a homogenous list of items.
+---@class lsp.FormFieldTypeList
+---@field kind 'list'
+---
+-- ElementType specifies the type of the items in the list.
+-- It must be one of the FormFieldType* structs (e.g., FormFieldTypeString).
+---@field elementType any
+
+-- FormField describes a single question in a form and its validation state.
+---@class lsp.FormField
+---
+-- Description is the text content of the question (the prompt) presented
+-- to the user.
+---@field description string
+---
+-- Type specifies the data type and validation constraints for the answer.
+--
+-- It must be one of the FormFieldType* structs. The Kind field within the
+-- struct determines the expected data type.
+--
+-- The language client is expected to render an input appropriate for this
+-- type. If the client does not support the specified type, it should
+-- fall back to a string input.
+---@field type any
+---
+-- Default specifies an optional initial value for the answer.
+--
+-- If Type is FormFieldTypeEnum, this value must be present in the enum's
+-- Values slice.
+---@field default? any
+---
+-- Error provides a validation message from the language server.
+-- If empty, the current answer is considered valid.
+---@field error? string
+
+-- InteractiveParams allow the server and client to exchange interactive
+-- questions and answers during an LSP request.
+--
+-- The server populates FormFields to define the schema. The server may
+-- optionally populate FormAnswers to preserve previous user input; if
+-- provided, the client may present these as default values.
+--
+-- When the client responds, it must provide FormAnswers. The client is not
+-- required to send FormFields back to the server.
+---@class lsp.InteractiveParams
+---
+-- FormFields defines the questions and validation errors in previous
+-- answers to the same questions.
+--
+-- This is a server-to-client field. The language server defines these, and
+-- the client uses them to render the form.
+--
+-- Note: This is a non-standard protocol extension. See microsoft/language-server-protocol#1164.
+---@field formFields? lsp.FormField[]
+---
+-- FormAnswers contains the values for the form questions.
+--
+-- When sent by the language server, this field is optional but recommended
+-- to support editing previous values.
+--
+-- When sent by the language client, this field is required. The slice must
+-- have the same length as FormFields (one answer per question), where the
+-- answer at index i corresponds to the field at index i.
+--
+-- Note: This is a non-standard protocol extension. See microsoft/language-server-protocol#1164.
+---@field formAnswers? any[]
+
+-- Extend existing ExecuteCommandParams
+---@class lsp.ExecuteCommandParams
+---@field formFields? lsp.FormField[]
+---@field formAnswers? any[]
