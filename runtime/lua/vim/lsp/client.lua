@@ -1070,7 +1070,49 @@ local function prompt_for_field(field, default_value, callback)
   end
 
   local kind = field.type.kind
-  if kind == 'string' then
+  if kind == 'documentURI' then
+    local has_telescope, telescope = pcall(require, "telescope.builtin")
+    if not has_telescope then
+      vim.ui.input({ prompt = field.description .. " (Path): ", default = default_value }, callback)
+      return
+    end
+
+    local actions = require("telescope.actions")
+    local action_state = require("telescope.actions.state")
+
+    telescope.find_files({
+      prompt_title = field.description,
+      -- cwd = default_value,
+      attach_mappings = function(prompt_bufnr, map)
+        -- HANDLE ENTER
+        actions.select_default:replace(function()
+          local selection = action_state.get_selected_entry()
+          -- Close IMMEDIATELY
+          actions.close(prompt_bufnr)
+          
+          if selection then
+            local path = selection.path or selection[1]
+            callback(vim.uri_from_fname(vim.fn.fnamemodify(path, ":p")))
+          else
+            callback(nil)
+          end
+        end)
+
+        -- HANDLE ESCAPE/CANCEL
+        -- If we don't do this, the second call often hangs
+        map('i', '<Esc>', function()
+          actions.close(prompt_bufnr)
+          callback(nil)
+        end)
+        map('n', '<Esc>', function()
+          actions.close(prompt_bufnr)
+          callback(nil)
+        end)
+
+        return true
+      end,
+    })
+  elseif kind == 'string' then
     vim.ui.input({
       prompt = field.description,
       default = default_value or field.default,
